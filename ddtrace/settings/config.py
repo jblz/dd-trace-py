@@ -301,6 +301,11 @@ def _default_config() -> Dict[str, _ConfigItem]:
             default=lambda: {},
             envs=[("DD_TAGS", _parse_global_tags)],
         ),
+        "_trace_report_handled_exceptions": _ConfigItem(
+            name="trace_report_handled_exceptions",
+            default=False,
+            envs=[("DD_TRACE_REPORT_HANDLED_EXCEPTIONS", asbool)],
+        ),
         "_tracing_enabled": _ConfigItem(
             name="trace_enabled",
             default=True,
