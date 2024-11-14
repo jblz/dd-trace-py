@@ -1,0 +1,7 @@
+DD_TRACE_RATE_LIMIT:
+   description: "Maximum number of traces per second to sample. Set a rate limit to avoid the ingestion volume overages in the case of traffic spikes. This configuration is only applied when client based sampling is configured, otherwise agent based rate limits are used."
+   required: false
+   type: int
+   min: 0
+   max: _
+   default: 100
