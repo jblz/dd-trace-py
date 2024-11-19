@@ -2,6 +2,7 @@ from collections import defaultdict
 from copy import deepcopy
 from inspect import getmodule
 import os
+import sys
 from types import CodeType
 from types import ModuleType
 import typing as t
@@ -13,7 +14,6 @@ from ddtrace.internal.coverage.report import print_coverage_report
 from ddtrace.internal.coverage.util import collapse_ranges
 from ddtrace.internal.logger import get_logger
 from ddtrace.internal.module import ModuleWatchdog
-from ddtrace.internal.packages import is_user_code
 from ddtrace.internal.packages import platlib_path
 from ddtrace.internal.packages import platstdlib_path
 from ddtrace.internal.packages import purelib_path
@@ -327,7 +327,9 @@ class ModuleCodeCollector(ModuleWatchdog):
             # Don't instrument code from standard library/site packages/etc.
             return code
 
-        if not is_user_code(code_path):
+        # PYTHONPATH usage can add directories that fall under the include path (eg: with riot) but are actually
+        # site-packages and should not be instrumented
+        if any(code_path.is_relative_to(sys_path) for sys_path in sys.path if sys_path not in self._include_paths):
             return code
 
         retval = self.instrument_code(code, _module.__package__ if _module is not None else "")
