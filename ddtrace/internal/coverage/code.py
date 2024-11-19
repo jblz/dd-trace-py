@@ -88,6 +88,14 @@ class ModuleCodeCollector(ModuleWatchdog):
         cls._instance._include_paths = include_paths
         cls._instance._collect_import_coverage = collect_import_time_coverage
 
+        # PYTHONPATH usage can add directories that fall under the include path (eg: with riot) but are actually
+        # site-packages and should not be instrumented. This only matters if the sys.path entry is relative to one of
+        # the include paths, so we add any sys.path entry that is relative to one of our include paths to our list of
+        # excluded paths
+        for sys_path in map(lambda x: Path(x).resolve(), sys.path):
+            if any(sys_path.is_relative_to(include_path) for include_path in cls._instance._include_paths):
+                cls._instance._exclude_paths.append(sys_path)
+
         if collect_import_time_coverage:
             ModuleCodeCollector.register_import_exception_hook(
                 lambda x: True, cls._instance._exit_context_on_exception_hook
@@ -326,12 +334,6 @@ class ModuleCodeCollector(ModuleWatchdog):
         if any(code_path.is_relative_to(exclude_path) for exclude_path in self._exclude_paths):
             # Don't instrument code from standard library/site packages/etc.
             return code
-
-        # PYTHONPATH usage can add directories that fall under the include path (eg: with riot) but are actually
-        # site-packages and should not be instrumented
-        for sys_path in map(lambda x: Path(x).resolve(), sys.path):
-            if sys_path not in self._include_paths and code_path.is_relative_to(sys_path):
-                return code
 
         retval = self.instrument_code(code, _module.__package__ if _module is not None else "")
 
