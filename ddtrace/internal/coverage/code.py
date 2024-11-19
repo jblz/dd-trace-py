@@ -93,7 +93,7 @@ class ModuleCodeCollector(ModuleWatchdog):
         # the include paths, so we add any sys.path entry that is relative to one of our include paths to our list of
         # excluded paths
         for sys_path in map(lambda x: Path(x).resolve(), sys.path):
-            if any(sys_path.is_relative_to(include_path) for include_path in cls._instance._include_paths):
+            if any(include_path in sys_path.parents for include_path in cls._instance._include_paths):
                 cls._instance._exclude_paths.append(sys_path)
 
         if collect_import_time_coverage:
