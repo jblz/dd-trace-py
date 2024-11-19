@@ -329,8 +329,9 @@ class ModuleCodeCollector(ModuleWatchdog):
 
         # PYTHONPATH usage can add directories that fall under the include path (eg: with riot) but are actually
         # site-packages and should not be instrumented
-        if any(code_path.is_relative_to(sys_path) for sys_path in sys.path if sys_path not in self._include_paths):
-            return code
+        for sys_path in map(lambda x: Path(x).resolve(), sys.path):
+            if sys_path not in self._include_paths and code_path.is_relative_to(sys_path):
+                return code
 
         retval = self.instrument_code(code, _module.__package__ if _module is not None else "")
 
