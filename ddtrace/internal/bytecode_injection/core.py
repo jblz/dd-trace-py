@@ -1,5 +1,6 @@
 import dis
 import sys
+from dataclasses import dataclass
 from types import CodeType
 import typing as t
 
@@ -10,11 +11,11 @@ Instruction = t.Tuple[int, int]
 
 # This is primarily to make mypy happy without having to nest the rest of this module behind a version check
 # NOTE: the "prettier" one-liner version (eg: assert (3,11) <= sys.version_info < (3,12)) does not work for mypy
-assert sys.version_info >= (3, 10) and sys.version_info < (3, 11)  # nosec
+assert sys.version_info >= (3, 10) and sys.version_info < (3, 12)  # nosec
 
 EXTENDED_ARG = dis.EXTENDED_ARG
 LOAD_CONST = dis.opmap["LOAD_CONST"]
-CALL = dis.opmap["CALL_FUNCTION"]
+CALL = dis.opmap["CALL_FUNCTION" if sys.version_info[:2] == (3, 10) else "CALL"]
 POP_TOP = dis.opmap["POP_TOP"]
 IMPORT_NAME = dis.opmap["IMPORT_NAME"]
 IMPORT_FROM = dis.opmap["IMPORT_FROM"]
@@ -25,13 +26,30 @@ BACKWARD_JUMPS = set(op for op in dis.hasjrel if "BACKWARD" in dis.opname[op])
 FORWARD_JUMPS = set(op for op in dis.hasjrel if "BACKWARD" not in dis.opname[op])
 
 
-def inject_invocation(code: CodeType, hook: HookType, path: str, package: str) -> t.Tuple[CodeType, CoverageLines]:
-    new_code, new_consts, new_linetable, seen_lines = _inject_invocation_nonrecursive(code, hook, path, package)
+@dataclass
+class InjectionContext:
+    original_code: CodeType
+    hook: HookType
+    lines_cb: t.Callable[["InjectionContext"], t.Dict[int, int]]
+
+    def transfer(self, code: CodeType) -> "InjectionContext":
+        return InjectionContext(code, self.hook, self.lines_cb)
+
+    @property
+    def injection_lines(self) -> t.Dict[int, int]:
+        return self.lines_cb(self)
+
+
+def inject_invocation(injection_context: InjectionContext, path: str, package: str) -> t.Tuple[CodeType, CoverageLines]:
+    code = injection_context.original_code
+    new_code, new_consts, new_linetable, seen_lines = _inject_invocation_nonrecursive(
+        injection_context, path, package)
 
     # Instrument nested code objects recursively.
     for const_index, nested_code in enumerate(code.co_consts):
         if isinstance(nested_code, CodeType):
-            new_consts[const_index], nested_lines = inject_invocation(nested_code, hook, path, package)
+            new_consts[const_index], nested_lines = inject_invocation(
+                injection_context.transfer(nested_code), path, package)
             seen_lines.update(nested_lines)
 
     return (
@@ -115,11 +133,14 @@ def inject_invocation(code: CodeType, hook: HookType, path: str, package: str) -
 
 
 def _inject_invocation_nonrecursive(
-    code: CodeType, hook: HookType, path: str, package: str
+    injection_context: InjectionContext, path: str, package: str
 ) -> t.Tuple[bytearray, t.List[object], bytearray, CoverageLines]:
+    code = injection_context.original_code
     old_code = code.co_code
     new_code = bytearray()
     new_linetable = bytearray()
+
+    is_python_3_11 = sys.version_info[:2] == (3, 11)
 
     previous_line = code.co_firstlineno
     previous_line_new_offset = 0
@@ -138,10 +159,11 @@ def _inject_invocation_nonrecursive(
     old_targets: t.Dict[int, int] = {}
 
     line_starts = dict(dis.findlinestarts(code))
+    line_injection_offsets = injection_context.injection_lines.keys()
 
     new_consts = list(code.co_consts)
     hook_index = len(new_consts)
-    new_consts.append(hook)
+    new_consts.append(injection_context.hook)
 
     seen_lines = CoverageLines()
     is_first_instrumented_module_line = code.co_name == "<module>"
@@ -215,25 +237,39 @@ def _inject_invocation_nonrecursive(
             previous_line_new_offset = new_offset
 
             seen_lines.add(line)
+            if old_offset in line_injection_offsets:
+                append_instruction(LOAD_CONST, hook_index)
+                append_instruction(LOAD_CONST, len(new_consts))
+                # DEV: Because these instructions have fixed arguments and don't need EXTENDED_ARGs, we append them directly
+                #      to the bytecode here. This loop runs for every instruction in the code to be instrumented, so this
+                #      has some impact on execution time.
+                if is_python_3_11:
+                    new_code.append(dis.opmap["PRECALL"])
+                    new_code.append(1)
+                    new_code.append(dis.opmap["CACHE"])
+                    new_code.append(0)
+                new_code.append(CALL)
+                new_code.append(1)
+                if is_python_3_11:
+                    new_code.append(dis.opmap["CACHE"])
+                    new_code.append(0)
+                    new_code.append(dis.opmap["CACHE"])
+                    new_code.append(0)
+                    new_code.append(dis.opmap["CACHE"])
+                    new_code.append(0)
+                    new_code.append(dis.opmap["CACHE"])
+                    new_code.append(0)
+                new_code.append(POP_TOP)
+                new_code.append(0)
 
-            append_instruction(LOAD_CONST, hook_index)
-            append_instruction(LOAD_CONST, len(new_consts))
-            # DEV: Because these instructions have fixed arguments and don't need EXTENDED_ARGs, we append them directly
-            #      to the bytecode here. This loop runs for every instruction in the code to be instrumented, so this
-            #      has some impact on execution time.
-            new_code.append(CALL)
-            new_code.append(1)
-            new_code.append(POP_TOP)
-            new_code.append(0)
+                # Make sure that the current module is marked as depending on its own package by instrumenting the
+                # first executable line.
+                package_dep = None
+                if is_first_instrumented_module_line:
+                    package_dep = (package, ("",))
+                    is_first_instrumented_module_line = False
 
-            # Make sure that the current module is marked as depending on its own package by instrumenting the
-            # first executable line.
-            package_dep = None
-            if is_first_instrumented_module_line:
-                package_dep = (package, ("",))
-                is_first_instrumented_module_line = False
-
-            new_consts.append((line, path, package_dep))
+                new_consts.append((line, path, package_dep))
 
         if opcode == EXTENDED_ARG:
             extended_arg = arg << 8
