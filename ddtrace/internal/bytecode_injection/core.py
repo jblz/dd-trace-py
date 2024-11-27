@@ -30,14 +30,14 @@ FORWARD_JUMPS = set(op for op in dis.hasjrel if "BACKWARD" not in dis.opname[op]
 class InjectionContext:
     original_code: CodeType
     hook: HookType
-    lines_cb: t.Callable[["InjectionContext"], t.Dict[int, int]]
+    offsets_cb: t.Callable[["InjectionContext"], t.List[int]]
 
     def transfer(self, code: CodeType) -> "InjectionContext":
-        return InjectionContext(code, self.hook, self.lines_cb)
+        return InjectionContext(code, self.hook, self.offsets_cb)
 
     @property
-    def injection_lines(self) -> t.Dict[int, int]:
-        return self.lines_cb(self)
+    def injection_offsets(self) -> t.List[int]:
+        return self.offsets_cb(self)
 
 
 def inject_invocation(injection_context: InjectionContext, path: str, package: str) -> t.Tuple[CodeType, CoverageLines]:
@@ -52,15 +52,14 @@ def inject_invocation(injection_context: InjectionContext, path: str, package: s
                 injection_context.transfer(nested_code), path, package)
             seen_lines.update(nested_lines)
 
-    return (
-        code.replace(
-            co_code=bytes(new_code),
-            co_consts=tuple(new_consts),
-            co_linetable=bytes(new_linetable),
-            co_stacksize=code.co_stacksize + 4,  # TODO: Compute the value!
-        ),
-        seen_lines,
+    code = code.replace(
+        co_code=bytes(new_code),
+        co_consts=tuple(new_consts),
+        co_linetable=bytes(new_linetable),
+        co_stacksize=code.co_stacksize + 4,  # TODO: Compute the value!
     )
+
+    return (code, seen_lines,)
 
 
 # This function returns a modified version of the bytecode for the given code object, such that the beginning of
@@ -159,7 +158,7 @@ def _inject_invocation_nonrecursive(
     old_targets: t.Dict[int, int] = {}
 
     line_starts = dict(dis.findlinestarts(code))
-    line_injection_offsets = injection_context.injection_lines.keys()
+    line_injection_offsets = injection_context.injection_offsets
 
     new_consts = list(code.co_consts)
     hook_index = len(new_consts)
@@ -168,23 +167,27 @@ def _inject_invocation_nonrecursive(
     seen_lines = CoverageLines()
     is_first_instrumented_module_line = code.co_name == "<module>"
 
-    def append_instruction(opcode: int, extended_arg: int) -> None:
+    def append_instruction(opcode: int, extended_arg: int) -> bytearray:
         """
         Append an operation and its argument to the new bytecode.
 
         If the argument does not fit in a single byte, EXTENDED_ARG instructions are prepended as needed.
         """
+        code_chunck = bytearray()
+
         if extended_arg > 255:
             extended_bytes = (extended_arg.bit_length() - 1) // 8
             shift = 8 * extended_bytes
 
             while shift:
-                new_code.append(EXTENDED_ARG)
-                new_code.append((extended_arg >> shift) & 0xFF)
+                code_chunck.append(EXTENDED_ARG)
+                code_chunck.append((extended_arg >> shift) & 0xFF)
                 shift -= 8
 
-        new_code.append(opcode)
-        new_code.append(extended_arg & 0xFF)
+        code_chunck.append(opcode)
+        code_chunck.append(extended_arg & 0xFF)
+
+        return code_chunck
 
     def update_linetable(offset_delta: int, line_delta: int) -> None:
         """
@@ -220,6 +223,9 @@ def _inject_invocation_nonrecursive(
         # Finally, append anything left from the line delta.
         new_linetable.append(line_delta & 0xFF)
 
+    # key: old offset, value: how many instructions have been injected at that spot
+    offsets_map: t.Dict[int, int] = {}
+
     for old_offset in range(0, len(old_code), 2):
         opcode = old_code[old_offset]
         arg = old_code[old_offset + 1] | extended_arg
@@ -238,29 +244,46 @@ def _inject_invocation_nonrecursive(
 
             seen_lines.add(line)
             if old_offset in line_injection_offsets:
-                append_instruction(LOAD_CONST, hook_index)
-                append_instruction(LOAD_CONST, len(new_consts))
+                instructions = []
+                # append_instruction(dis.opmap["LOAD_GLOBAL"], 3)
+                # new_code.append(dis.opmap["CACHE"])
+                # new_code.append(0)
+                # new_code.append(dis.opmap["CACHE"])
+                # new_code.append(0)
+                # new_code.append(dis.opmap["CACHE"])
+                # new_code.append(0)
+                # new_code.append(dis.opmap["CACHE"])
+                # new_code.append(0)
+                # new_code.append(dis.opmap["CACHE"])
+                # new_code.append(0)
+                # new_code.append(LOAD_CONST)
+                # new_code.append(aaa_idx)
+                instructions.extend(append_instruction(LOAD_CONST, hook_index))
+                instructions.extend(append_instruction(LOAD_CONST, len(new_consts)))
                 # DEV: Because these instructions have fixed arguments and don't need EXTENDED_ARGs, we append them directly
                 #      to the bytecode here. This loop runs for every instruction in the code to be instrumented, so this
                 #      has some impact on execution time.
                 if is_python_3_11:
-                    new_code.append(dis.opmap["PRECALL"])
-                    new_code.append(1)
-                    new_code.append(dis.opmap["CACHE"])
-                    new_code.append(0)
-                new_code.append(CALL)
-                new_code.append(1)
+                    instructions.append(dis.opmap["PRECALL"])
+                    instructions.append(1)
+                    instructions.append(dis.opmap["CACHE"])
+                    instructions.append(0)
+                instructions.append(CALL)
+                instructions.append(1)
                 if is_python_3_11:
-                    new_code.append(dis.opmap["CACHE"])
-                    new_code.append(0)
-                    new_code.append(dis.opmap["CACHE"])
-                    new_code.append(0)
-                    new_code.append(dis.opmap["CACHE"])
-                    new_code.append(0)
-                    new_code.append(dis.opmap["CACHE"])
-                    new_code.append(0)
-                new_code.append(POP_TOP)
-                new_code.append(0)
+                    instructions.append(dis.opmap["CACHE"])
+                    instructions.append(0)
+                    instructions.append(dis.opmap["CACHE"])
+                    instructions.append(0)
+                    instructions.append(dis.opmap["CACHE"])
+                    instructions.append(0)
+                    instructions.append(dis.opmap["CACHE"])
+                    instructions.append(0)
+                instructions.append(POP_TOP)
+                instructions.append(0)
+
+                offsets_map[old_offset] = len(instructions)
+                new_code.extend(instructions)
 
                 # Make sure that the current module is marked as depending on its own package by instrumenting the
                 # first executable line.
@@ -270,6 +293,8 @@ def _inject_invocation_nonrecursive(
                     is_first_instrumented_module_line = False
 
                 new_consts.append((line, path, package_dep))
+        else:
+            offsets_map[old_offset] = 0
 
         if opcode == EXTENDED_ARG:
             extended_arg = arg << 8
@@ -359,4 +384,87 @@ def _inject_invocation_nonrecursive(
             arg >>= 8
             arg_offset -= 2
 
-    return new_code, new_consts, new_linetable, seen_lines
+    return new_code, new_consts, update_location_data(injection_context.original_code, offsets_map, []), seen_lines
+
+
+def update_location_data(
+    code: CodeType, trap_map: t.Dict[int, int], ext_arg_offsets: t.List[t.Tuple[int, int]]
+) -> bytearray:
+    # DEV: We expect the original offsets in the trap_map
+    new_data = bytearray()
+
+    data = code.co_linetable
+    data_iter = iter(data)
+    ext_arg_offset_iter = iter(sorted(ext_arg_offsets))
+    ext_arg_offset, ext_arg_size = next(ext_arg_offset_iter, (None, None))
+
+    original_offset = offset = 0
+    while True:
+        try:
+            chunk = bytearray()
+
+            b = next(data_iter)
+
+            chunk.append(b)
+
+            offset_delta = ((b & 7) + 1) << 1
+            loc_code = (b >> 3) & 0xF
+
+            if loc_code == 14:
+                chunk.extend(consume_signed_varint(data_iter))
+                for _ in range(3):
+                    chunk.extend(consume_varint(data_iter))
+            elif loc_code == 13:
+                chunk.extend(consume_signed_varint(data_iter))
+            elif 10 <= loc_code <= 12:
+                for _ in range(2):
+                    chunk.append(next(data_iter))
+            elif 0 <= loc_code <= 9:
+                chunk.append(next(data_iter))
+
+            if original_offset in trap_map:
+                # No location info for the trap bytecode
+                trap_size = trap_map[original_offset]
+                n, r = divmod(trap_size, 8)
+                for _ in range(n):
+                    new_data.append(0x80 | (0xF << 3) | 7)
+                if r:
+                    new_data.append(0x80 | (0xF << 3) | r - 1)
+                offset += trap_size << 1
+
+            # Extend the line table record if we added any EXTENDED_ARGs
+            original_offset += offset_delta
+            offset += offset_delta
+            if ext_arg_offset is not None and offset > ext_arg_offset:
+                room = 7 - offset_delta
+                chunk[0] += min(room, t.cast(int, ext_arg_size))
+                if room < t.cast(int, ext_arg_size):
+                    chunk.append(0x80 | (0xF << 3) | t.cast(int, ext_arg_size) - room)
+                offset += ext_arg_size << 1
+
+                ext_arg_offset, ext_arg_size = next(ext_arg_offset_iter, (None, None))
+
+            new_data.extend(chunk)
+        except StopIteration:
+            break
+
+    return new_data
+
+
+def consume_varint(stream: t.Iterable[int]) -> bytes:
+    a = bytearray()
+
+    b = next(stream)
+    a.append(b)
+
+    value = b & 0x3F
+    while b & 0x40:
+        b = next(stream)
+        a.append(b)
+
+        value = (value << 6) | (b & 0x3F)
+
+    return bytes(a)
+
+
+consume_signed_varint = consume_varint  # They are the same thing for our purposes
