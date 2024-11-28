@@ -327,7 +327,7 @@ def _inject_invocation_nonrecursive(
             new_ends[old_offset] = len(new_code)
 
         else:
-            append_instruction(opcode, arg)
+            new_code.extend(append_instruction(opcode, arg))
 
             # Track imports names
             if opcode == IMPORT_NAME:
