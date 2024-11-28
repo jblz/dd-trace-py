@@ -1,13 +1,12 @@
+from dataclasses import dataclass
 import dis
 import sys
-from dataclasses import dataclass
 from types import CodeType
 import typing as t
 
 from ddtrace.internal.injection import HookType
 from ddtrace.internal.test_visibility.coverage_lines import CoverageLines
 
-Instruction = t.Tuple[int, int]
 
 # This is primarily to make mypy happy without having to nest the rest of this module behind a version check
 # NOTE: the "prettier" one-liner version (eg: assert (3,11) <= sys.version_info < (3,12)) does not work for mypy
@@ -42,14 +41,14 @@ class InjectionContext:
 
 def inject_invocation(injection_context: InjectionContext, path: str, package: str) -> t.Tuple[CodeType, CoverageLines]:
     code = injection_context.original_code
-    new_code, new_consts, new_linetable, seen_lines = _inject_invocation_nonrecursive(
-        injection_context, path, package)
+    new_code, new_consts, new_linetable, seen_lines = _inject_invocation_nonrecursive(injection_context, path, package)
 
     # Instrument nested code objects recursively.
     for const_index, nested_code in enumerate(code.co_consts):
         if isinstance(nested_code, CodeType):
             new_consts[const_index], nested_lines = inject_invocation(
-                injection_context.transfer(nested_code), path, package)
+                injection_context.transfer(nested_code), path, package
+            )
             seen_lines.update(nested_lines)
 
     code = code.replace(
@@ -59,7 +58,10 @@ def inject_invocation(injection_context: InjectionContext, path: str, package: s
         co_stacksize=code.co_stacksize + 4,  # TODO: Compute the value!
     )
 
-    return (code, seen_lines,)
+    return (
+        code,
+        seen_lines,
+    )
 
 
 # This function returns a modified version of the bytecode for the given code object, such that the beginning of
@@ -234,6 +236,7 @@ def _inject_invocation_nonrecursive(
         new_offsets[old_offset] = new_offset
 
         line = line_starts.get(old_offset)
+        injected_opcodes_count = 0
         if line is not None:
             if old_offset > 0:
                 # Beginning of new line: update line table entry for _previous_ line.
@@ -244,25 +247,14 @@ def _inject_invocation_nonrecursive(
 
             seen_lines.add(line)
             if old_offset in line_injection_offsets:
-                instructions = []
-                # append_instruction(dis.opmap["LOAD_GLOBAL"], 3)
-                # new_code.append(dis.opmap["CACHE"])
-                # new_code.append(0)
-                # new_code.append(dis.opmap["CACHE"])
-                # new_code.append(0)
-                # new_code.append(dis.opmap["CACHE"])
-                # new_code.append(0)
-                # new_code.append(dis.opmap["CACHE"])
-                # new_code.append(0)
-                # new_code.append(dis.opmap["CACHE"])
-                # new_code.append(0)
-                # new_code.append(LOAD_CONST)
-                # new_code.append(aaa_idx)
+                instructions = bytearray()
+                instructions.append(dis.opmap["PUSH_NULL"])
+                instructions.append(0)
                 instructions.extend(append_instruction(LOAD_CONST, hook_index))
                 instructions.extend(append_instruction(LOAD_CONST, len(new_consts)))
-                # DEV: Because these instructions have fixed arguments and don't need EXTENDED_ARGs, we append them directly
-                #      to the bytecode here. This loop runs for every instruction in the code to be instrumented, so this
-                #      has some impact on execution time.
+                # DEV: Because these instructions have fixed arguments and don't need EXTENDED_ARGs, we append them
+                #      directly to the bytecode here. This loop runs for every instruction in the code to be
+                #      instrumented, so this has some impact on execution time.
                 if is_python_3_11:
                     instructions.append(dis.opmap["PRECALL"])
                     instructions.append(1)
@@ -283,6 +275,7 @@ def _inject_invocation_nonrecursive(
                 instructions.append(0)
 
                 offsets_map[old_offset] = len(instructions)
+                injected_opcodes_count += len(instructions)
                 new_code.extend(instructions)
 
                 # Make sure that the current module is marked as depending on its own package by instrumenting the
