@@ -248,10 +248,14 @@ def _inject_invocation_nonrecursive(
             seen_lines.add(line)
             if old_offset in line_injection_offsets:
                 instructions = bytearray()
-                instructions.append(dis.opmap["PUSH_NULL"])
-                instructions.append(0)
+
+                if is_python_3_11:
+                    instructions.append(dis.opmap["PUSH_NULL"])
+                    instructions.append(0)
+
                 instructions.extend(append_instruction(LOAD_CONST, hook_index))
                 instructions.extend(append_instruction(LOAD_CONST, len(new_consts)))
+
                 # DEV: Because these instructions have fixed arguments and don't need EXTENDED_ARGs, we append them
                 #      directly to the bytecode here. This loop runs for every instruction in the code to be
                 #      instrumented, so this has some impact on execution time.
