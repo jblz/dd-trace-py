@@ -41,10 +41,10 @@ def test_injection_in_try_catch():
     def will_be_injected():
         accumulate.append(1)
         try:
-            raise ValueError('this is a value error')
+            raise ValueError("this is a value error")
         except ValueError as _:
             # in this spot we are going to inject accumulate(2)
-            print('I am handling the exception')
+            print("I am handling the exception")
         accumulate.append(3)
 
     def accumulate_2(*args):
